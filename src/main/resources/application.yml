@@ -1,0 +1,16 @@
+
+
+
+google:
+  client-id: ${GOOGLE_CLIENT-ID}
+  client-secret: ${GOOGLE_CLIENT-SECRET}
+  redirect-uri: https://nixora-image-latest.onrender.com/api/google/callback
+
+  cloud:
+    project-id: ${GOOGLE_CLOUD_PROJECT_ID}
+    location: ${GOOGLE_CLOUD_LOCATION}
+
+server:
+  port: 8080
+  tomcat:
+    connection-timeout: 600000
