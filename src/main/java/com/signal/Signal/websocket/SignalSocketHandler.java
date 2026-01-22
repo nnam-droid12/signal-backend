@@ -118,34 +118,39 @@ public class SignalSocketHandler extends TextWebSocketHandler {
             }
 
             String systemText = """
-                You are SIGNAL, a real-time accessibility co-pilot for deaf engineers.
-                Analyze the audio buffer. If a key moment occurs, extract the specifics.
+                You are SIGNAL, a strict technical meeting analyst.
                 
-                1. DECISION_POINT: If a decision is made, set 'description' to exactly WHAT was decided (e.g., "Team agreed to use PostgreSQL").
-                2. INPUT_REQUIRED: If the user is asked a question, set 'description' to exactly WHAT input is needed (e.g., "They are asking for your opinion on the API design").
-                3. RISK_DETECTED: If a risk is flagged, set 'description' to the specific risk mentioned (e.g., "Concern raised about latency issues").
-                4. IDLE: If no high-impact moment occurs.
+                CONTEXT: You are listening to a Software Engineering meeting.
+                
+                YOUR JOB:
+                1. Filter out silence, background noise, or non-technical chatter.
+                2. Only trigger if you hear explicit Engineering Intent:
+                   - DECISION_POINT: "We will use Postgres", "Let's merge this."
+                   - INPUT_REQUIRED: "What do you think?", "Any objections?"
+                   - RISK_DETECTED: "This will crash prod", "Latency is too high."
+                
+                CONSTRAINT:
+                If the audio is unclear, silence, or not about software engineering -> Return { "type": "IDLE" }.
+                DO NOT INVENT TEXT. DO NOT HALLUCINATE.
 
-                Output strict JSON:
+                Output JSON:
                 {
                   "type": "DECISION_POINT" | "INPUT_REQUIRED" | "RISK_DETECTED" | "IDLE",
                   "title": "Short Headline",
-                  "description": "Specific details from the conversation as defined above.",
-                  "suggestedResponse": "A helpful first-person response for the user to type.",
+                  "description": "Specific details.",
+                  "suggestedResponse": "First-person professional response.",
                   "confidence": 0.0 to 1.0
                 }
                 """;
 
             Content systemInstruction = Content.builder()
-                    .parts(Collections.singletonList(
-                            Part.builder().text(systemText).build()
-                    ))
+                    .parts(Collections.singletonList(Part.builder().text(systemText).build()))
                     .build();
 
             GenerateContentConfig config = GenerateContentConfig.builder()
                     .responseMimeType("application/json")
                     .systemInstruction(systemInstruction)
-                    .temperature(0.4f)
+                    .temperature(0.2f)
                     .build();
 
             Content userContent = Content.builder()
@@ -153,22 +158,41 @@ public class SignalSocketHandler extends TextWebSocketHandler {
                     .parts(Collections.singletonList(
                             Part.builder()
                                     .inlineData(Blob.builder()
-                                            .mimeType("audio/webm")
+                                            .mimeType("audio/webm") // Matches browser recording
                                             .data(audioData)
                                             .build())
                                     .build()
                     ))
                     .build();
 
-            GenerateContentResponse response = geminiClient.models.generateContent(
-                    "gemini-3-pro-preview",
-                    userContent,
-                    config
-            );
+            GenerateContentResponse response;
+
+
+            try {
+                // 1. Try the Intelligence (Gemini 3 Pro)
+                response = geminiClient.models.generateContent(
+                        "gemini-3-pro-preview",
+                        userContent,
+                        config
+                );
+            } catch (Exception e) {
+                // Check for 429 (Quota)
+                if (e.getMessage().contains("429") || e.getMessage().contains("Resource exhausted") || e.getMessage().contains("404")) {
+                    log.warn(" Gemini 3 Pro Issue (" + e.getMessage() + "). Switching to Gemini 3 Flash...");
+
+                    // 2. Fallback to Gemini 3 Flash
+                    response = geminiClient.models.generateContent(
+                            "gemini-3-flash-preview",
+                            userContent,
+                            config
+                    );
+                } else {
+                    throw e;
+                }
+            }
 
             String resultText = response.text();
             if (resultText != null) {
-
                 resultText = resultText.replace("```json", "").replace("```", "").trim();
 
                 SignalResponse signal = objectMapper.readValue(resultText, SignalResponse.class);
@@ -180,8 +204,7 @@ public class SignalSocketHandler extends TextWebSocketHandler {
             }
 
         } catch (Exception e) {
-            log.error("Error in Gemini Processing: " + e.getMessage());
-            e.printStackTrace();
+            log.error("Signal Processing Error: " + e.getMessage());
         }
     }
 
