@@ -1,4 +1,4 @@
-package com.signal.Signal.service;
+package com.signal.Signal.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -24,11 +24,14 @@ public class SignalResponse {
 
     private Instant timestamp;
 
+    private String imageBase64;
+
     public enum SignalType {
         DECISION_POINT,
         INPUT_REQUIRED,
         RISK_DETECTED,
         CONTRADICTION,
-        IDLE
+        IDLE,
+        IMAGE_GENERATED
     }
 }

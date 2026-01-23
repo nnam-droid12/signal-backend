@@ -4,15 +4,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.genai.Client;
 import com.google.genai.types.*;
-import com.signal.Signal.service.SignalResponse;
-import jakarta.annotation.PostConstruct; // Standard for Spring Boot 3 / Java 17
+import com.signal.Signal.dto.SignalResponse;
+import com.signal.Signal.service.SignalBoardService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Collections;
@@ -29,7 +28,10 @@ public class SignalSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper objectMapper;
 
     private final ExecutorService executorService = Executors.newCachedThreadPool();
-    private Client geminiClient;
+
+    private final Client geminiClient;
+
+    private final SignalBoardService signalBoardService;
 
     @Value("${google.cloud.project-id}")
     private String projectId;
@@ -38,32 +40,12 @@ public class SignalSocketHandler extends TextWebSocketHandler {
     private static final int BUFFER_THRESHOLD = 60000;
 
 
-    public SignalSocketHandler(ObjectMapper objectMapper) {
+    public SignalSocketHandler(ObjectMapper objectMapper, Client geminiClient, SignalBoardService signalBoardService) {
         this.objectMapper = objectMapper;
+        this.geminiClient = geminiClient;
+        this.signalBoardService = signalBoardService;
     }
 
-    @PostConstruct
-    public void init() {
-        try {
-            log.info(" Initializing Gemini Client for Project: " + projectId);
-
-            String keyPath = "/etc/secrets/google-key.json";
-
-            GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(keyPath))
-                    .createScoped(Collections.singletonList("https://www.googleapis.com/auth/cloud-platform"));
-
-            this.geminiClient = Client.builder()
-                    .project(projectId)
-                    .location("global")
-                    .credentials(credentials)
-                    .vertexAI(true)
-                    .build();
-
-            log.info("Gemini 3 Client Ready!");
-        } catch (Exception e) {
-            log.error("CRITICAL: Failed to initialize Gemini Client", e);
-        }
-    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
@@ -118,30 +100,30 @@ public class SignalSocketHandler extends TextWebSocketHandler {
             }
 
             String systemText = """
-                You are SIGNAL, a strict technical meeting analyst.
-                
-                CONTEXT: You are listening to a Software Engineering meeting.
-                
-                YOUR JOB:
-                1. Filter out silence, background noise, or non-technical chatter.
-                2. Only trigger if you hear explicit Engineering Intent:
-                   - DECISION_POINT: "We will use Postgres", "Let's merge this."
-                   - INPUT_REQUIRED: "What do you think?", "Any objections?"
-                   - RISK_DETECTED: "This will crash prod", "Latency is too high."
-                
-                CONSTRAINT:
-                If the audio is unclear, silence, or not about software engineering -> Return { "type": "IDLE" }.
-                DO NOT INVENT TEXT. DO NOT HALLUCINATE.
+            You are SIGNAL, a strict technical meeting analyst.
+            
+            CONTEXT: You are listening to a Software Engineering meeting.
+            
+            YOUR JOB:
+            1. Filter out silence, background noise, or non-technical chatter.
+            2. Only trigger if you hear explicit Engineering Intent:
+               - DECISION_POINT: "We will use Postgres", "Let's merge this."
+               - INPUT_REQUIRED: "What do you think?", "Any objections?"
+               - RISK_DETECTED: "This will crash prod", "Latency is too high."
+            
+            CONSTRAINT:
+            If the audio is unclear, silence, or not about software engineering -> Return { "type": "IDLE" }.
+            DO NOT INVENT TEXT. DO NOT HALLUCINATE.
 
-                Output JSON:
-                {
-                  "type": "DECISION_POINT" | "INPUT_REQUIRED" | "RISK_DETECTED" | "IDLE",
-                  "title": "Short Headline",
-                  "description": "Specific details.",
-                  "suggestedResponse": "First-person professional response.",
-                  "confidence": 0.0 to 1.0
-                }
-                """;
+            Output JSON:
+            {
+              "type": "DECISION_POINT" | "INPUT_REQUIRED" | "RISK_DETECTED" | "IDLE",
+              "title": "Short Headline",
+              "description": "Specific details.",
+              "suggestedResponse": "First-person professional response.",
+              "confidence": 0.0 to 1.0
+            }
+            """;
 
             Content systemInstruction = Content.builder()
                     .parts(Collections.singletonList(Part.builder().text(systemText).build()))
@@ -158,7 +140,7 @@ public class SignalSocketHandler extends TextWebSocketHandler {
                     .parts(Collections.singletonList(
                             Part.builder()
                                     .inlineData(Blob.builder()
-                                            .mimeType("audio/webm") // Matches browser recording
+                                            .mimeType("audio/webm")
                                             .data(audioData)
                                             .build())
                                     .build()
@@ -167,19 +149,16 @@ public class SignalSocketHandler extends TextWebSocketHandler {
 
             GenerateContentResponse response;
 
-
             try {
-                // 1. Try the Intelligence (Gemini 3 Pro)
+                // 1. Try Gemini 3 Pro
                 response = geminiClient.models.generateContent(
                         "gemini-3-pro-preview",
                         userContent,
                         config
                 );
             } catch (Exception e) {
-                // Check for 429 (Quota)
                 if (e.getMessage().contains("429") || e.getMessage().contains("Resource exhausted") || e.getMessage().contains("404")) {
-                    log.warn(" Gemini 3 Pro Issue (" + e.getMessage() + "). Switching to Gemini 3 Flash...");
-
+                    log.warn("Gemini 3 Pro Issue (" + e.getMessage() + "). Switching to Flash...");
                     // 2. Fallback to Gemini 3 Flash
                     response = geminiClient.models.generateContent(
                             "gemini-3-flash-preview",
@@ -199,7 +178,24 @@ public class SignalSocketHandler extends TextWebSocketHandler {
 
                 if (signal.getType() != SignalResponse.SignalType.IDLE) {
                     signal.setTimestamp(Instant.now());
+
+                    // 1. Send the Text Signal first (Fast)
                     sendSignal(session, signal);
+
+                    // 2. Check for "Architecture Board" Trigger (The Creative Autopilot)
+                    if (signal.getType() == SignalResponse.SignalType.DECISION_POINT) {
+
+                        String desc = signal.getDescription().toLowerCase();
+
+                        // Trigger if the conversation is about structure/design
+                        if (desc.contains("architecture") || desc.contains("design") ||
+                                desc.contains("structure") || desc.contains("flow") || desc.contains("diagram")) {
+
+                            log.info("Triggering Nano Banana Pro for: " + desc);
+                            // Call the Image Service (Async)
+                            signalBoardService.generateDiagram(session, signal.getDescription());
+                        }
+                    }
                 }
             }
 

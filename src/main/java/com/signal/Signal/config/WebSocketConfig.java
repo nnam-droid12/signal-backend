@@ -1,5 +1,6 @@
-package com.signal.Signal.websocket;
+package com.signal.Signal.config;
 
+import com.signal.Signal.websocket.SignalSocketHandler;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
