@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 
 @Slf4j
@@ -29,67 +30,98 @@ public class SignalBoardService {
 
     @Async
     public void generateDiagram(WebSocketSession session, String conversationContext) {
-        try {
-            log.info("Asking Nano Banana Pro to visualize architecture...");
+        int maxRetries = 3;
+        int attempt = 0;
+        boolean success = false;
 
-            String visualPrompt = """
-                You are an expert software architect.
-                Based on this conversation: "%s"
-                
-                Generate a professional high-fidelity cloud architecture diagram.
-                - Style: Whiteboard technical diagram, clean lines, legible text.
-                - Components: Include accurate icons for the services mentioned.
-                - Detail: High resolution, optimized for readability.
-            """.formatted(conversationContext);
+        String visualPrompt = """
+            Create a high-fidelity software architecture diagram based on this:
+            "%s"
+            
+            Requirements:
+            - Whiteboard style with clear icons (Postgres, Redis, API Gateway).
+            - Draw arrows showing the flow from Gateway to Services.
+            - High resolution output.
+        """.formatted(conversationContext);
 
-            GenerateContentConfig config = GenerateContentConfig.builder()
-                    .responseModalities(Arrays.asList("TEXT", "IMAGE"))
-                    .temperature(0.5f)
-                    .build();
-
-
-            GenerateContentResponse response = geminiClient.models.generateContent(
-                    "gemini-3-pro-image-preview",
-                    Content.builder().parts(Collections.singletonList(
-                            Part.builder().text(visualPrompt).build()
-                    )).build(),
-                    config
-            );
-
-            if (response.parts() != null) {
-                for (Part part : response.parts()) {
-
-                    if (part.inlineData().isPresent()) {
-                        Blob blob = part.inlineData().get();
-
-                        if (blob.data().isPresent()) {
-                            byte[] imageBytes = blob.data().get();
-
-                            if (imageBytes != null && imageBytes.length > 0) {
-                                String base64Image = Base64.getEncoder().encodeToString(imageBytes);
+        GenerateContentConfig config = GenerateContentConfig.builder()
+                .responseModalities(Arrays.asList("TEXT", "IMAGE"))
+                .temperature(0.5f)
+                .build();
 
 
-                                SignalResponse visualSignal = SignalResponse.builder()
-                                        .type(SignalResponse.SignalType.IMAGE_GENERATED)
-                                        .title("Live Architecture Board")
-                                        .description("Gemini 3 generated this diagram from the discussion.")
-                                        .imageBase64(base64Image)
-                                        .timestamp(Instant.now())
-                                        .confidence(1.0)
-                                        .build();
+        while (attempt < maxRetries && !success) {
+            try {
+                attempt++;
+                log.info("Asking Nano Banana Pro (Attempt " + attempt + "/" + maxRetries + ")...");
 
-                                socketHandler.sendSignal(session, visualSignal);
-                                log.info("Nano Banana Pro Diagram Sent!");
-                                return;
+                GenerateContentResponse response = geminiClient.models.generateContent(
+                        "gemini-3-pro-image-preview",
+                        Content.builder()
+                                .role("user")
+                                .parts(Collections.singletonList(
+                                        Part.builder().text(visualPrompt).build()
+                                )).build(),
+                        config
+                );
+
+                List<Candidate> candidates = response.candidates().orElse(Collections.emptyList());
+
+                for (Candidate candidate : candidates) {
+                    if (candidate.content().isPresent()) {
+                        Content content = candidate.content().get();
+                        List<Part> parts = content.parts().orElse(Collections.emptyList());
+
+                        for (Part part : parts) {
+                            if (part.inlineData().isPresent()) {
+                                Blob blob = part.inlineData().get();
+                                if (blob.data().isPresent()) {
+                                    byte[] imageBytes = blob.data().get();
+
+                                    String base64Image = Base64.getEncoder().encodeToString(imageBytes);
+
+                                    SignalResponse visualSignal = SignalResponse.builder()
+                                            .type(SignalResponse.SignalType.IMAGE_GENERATED)
+                                            .title("Live Architecture Board")
+                                            .description("Gemini 3 generated this diagram from the discussion.")
+                                            .imageBase64(base64Image)
+                                            .timestamp(Instant.now())
+                                            .confidence(1.0)
+                                            .build();
+
+                                    socketHandler.sendSignal(session, visualSignal);
+                                    log.info("Diagram Sent to Frontend!");
+                                    success = true;
+                                    return;
+                                }
                             }
                         }
                     }
                 }
-            }
-            log.warn("No image found in Gemini response.");
 
-        } catch (Exception e) {
-            log.error("Failed to generate diagram with Nano Banana Pro", e);
+                if (!success) {
+                    log.warn("Request succeeded but no image data found.");
+                    success = true;
+                }
+
+            } catch (Exception e) {
+
+                if (e.getMessage().contains("429") || e.getMessage().contains("Resource exhausted")) {
+                    log.warn("Quota Limit (429). Waiting to retry...");
+                    try {
+                        Thread.sleep(2000L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                } else {
+                    log.error("Critical Error (Not Quota): " + e.getMessage());
+                    break;
+                }
+            }
+        }
+
+        if (!success) {
+            log.error("Failed to generate diagram after " + maxRetries + " attempts.");
         }
     }
 }
