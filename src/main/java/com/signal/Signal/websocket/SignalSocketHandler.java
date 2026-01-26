@@ -1,17 +1,18 @@
 package com.signal.Signal.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.auth.oauth2.GoogleCredentials;
 import com.google.genai.Client;
 import com.google.genai.types.*;
 import com.signal.Signal.dto.SignalResponse;
 import com.signal.Signal.service.SignalBoardService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Collections;
@@ -24,13 +25,9 @@ import java.util.concurrent.Executors;
 public class SignalSocketHandler extends TextWebSocketHandler {
 
     private final CopyOnWriteArrayList<WebSocketSession> sessions = new CopyOnWriteArrayList<>();
-
     private final ObjectMapper objectMapper;
-
     private final ExecutorService executorService = Executors.newCachedThreadPool();
-
     private final Client geminiClient;
-
     private final SignalBoardService signalBoardService;
 
     @Value("${google.cloud.project-id}")
@@ -39,13 +36,13 @@ public class SignalSocketHandler extends TextWebSocketHandler {
     private byte[] audioBuffer = new byte[0];
     private static final int BUFFER_THRESHOLD = 60000;
 
-
-    public SignalSocketHandler(ObjectMapper objectMapper, Client geminiClient, SignalBoardService signalBoardService) {
+    public SignalSocketHandler(ObjectMapper objectMapper,
+                               Client geminiClient,
+                               @Lazy SignalBoardService signalBoardService) {
         this.objectMapper = objectMapper;
         this.geminiClient = geminiClient;
         this.signalBoardService = signalBoardService;
     }
-
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
@@ -71,7 +68,6 @@ public class SignalSocketHandler extends TextWebSocketHandler {
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
-
         String payload = message.getPayload();
         log.info("Received command: " + payload);
     }
@@ -192,7 +188,7 @@ public class SignalSocketHandler extends TextWebSocketHandler {
                                 desc.contains("structure") || desc.contains("flow") || desc.contains("diagram")) {
 
                             log.info("Triggering Nano Banana Pro for: " + desc);
-                            // Call the Image Service (Async)
+
                             signalBoardService.generateDiagram(session, signal.getDescription());
                         }
                     }
