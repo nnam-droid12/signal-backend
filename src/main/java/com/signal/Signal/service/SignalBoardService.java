@@ -16,7 +16,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 
 @Slf4j
 @Service
@@ -30,98 +29,88 @@ public class SignalBoardService {
 
     @Async
     public void generateDiagram(WebSocketSession session, String conversationContext) {
-        int maxRetries = 3;
-        int attempt = 0;
-        boolean success = false;
+        sendLoadingSignal(session);
 
         String visualPrompt = """
-            Create a high-fidelity software architecture diagram based on this:
-            "%s"
+            Visual prompt for software architecture:
+            %s
             
-            Requirements:
-            - Whiteboard style with clear icons (Postgres, Redis, API Gateway).
-            - Draw arrows showing the flow from Gateway to Services.
-            - High resolution output.
+            Style: Technical whiteboard, high contrast, specific icons (Postgres, Redis).
+            Draw immediately.
         """.formatted(conversationContext);
 
         GenerateContentConfig config = GenerateContentConfig.builder()
-                .responseModalities(Arrays.asList("TEXT", "IMAGE"))
-                .temperature(0.5f)
+                .responseModalities(Arrays.asList("IMAGE"))
+                .temperature(0.4f)
                 .build();
 
 
-        while (attempt < maxRetries && !success) {
+        int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                attempt++;
-                log.info("Asking Nano Banana Pro (Attempt " + attempt + "/" + maxRetries + ")...");
+                log.info("Gemini 3 Generation (Attempt " + attempt + ")...");
 
                 GenerateContentResponse response = geminiClient.models.generateContent(
                         "gemini-3-pro-image-preview",
-                        Content.builder()
-                                .role("user")
-                                .parts(Collections.singletonList(
-                                        Part.builder().text(visualPrompt).build()
-                                )).build(),
+                        Content.builder().role("user").parts(Collections.singletonList(
+                                Part.builder().text(visualPrompt).build()
+                        )).build(),
                         config
                 );
 
-                List<Candidate> candidates = response.candidates().orElse(Collections.emptyList());
-
-                for (Candidate candidate : candidates) {
-                    if (candidate.content().isPresent()) {
-                        Content content = candidate.content().get();
-                        List<Part> parts = content.parts().orElse(Collections.emptyList());
-
-                        for (Part part : parts) {
-                            if (part.inlineData().isPresent()) {
-                                Blob blob = part.inlineData().get();
-                                if (blob.data().isPresent()) {
-                                    byte[] imageBytes = blob.data().get();
-
-                                    String base64Image = Base64.getEncoder().encodeToString(imageBytes);
-
-                                    SignalResponse visualSignal = SignalResponse.builder()
-                                            .type(SignalResponse.SignalType.IMAGE_GENERATED)
-                                            .title("Live Architecture Board")
-                                            .description("Gemini 3 generated this diagram from the discussion.")
-                                            .imageBase64(base64Image)
-                                            .timestamp(Instant.now())
-                                            .confidence(1.0)
-                                            .build();
-
-                                    socketHandler.sendSignal(session, visualSignal);
-                                    log.info("Diagram Sent to Frontend!");
-                                    success = true;
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (!success) {
-                    log.warn("Request succeeded but no image data found.");
-                    success = true;
-                }
+                if (extractAndSendImage(session, response)) return;
 
             } catch (Exception e) {
-
                 if (e.getMessage().contains("429") || e.getMessage().contains("Resource exhausted")) {
-                    log.warn("Quota Limit (429). Waiting to retry...");
-                    try {
-                        Thread.sleep(2000L * attempt);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
+
+                    long wait = 1000L * attempt;
+                    log.warn("Quota (429). Retrying in " + wait + "ms...");
+                    try { Thread.sleep(wait); } catch (InterruptedException ignored) {}
                 } else {
-                    log.error("Critical Error (Not Quota): " + e.getMessage());
+                    log.error("Critical Error: " + e.getMessage());
                     break;
                 }
             }
         }
+        log.error("Failed to generate diagram after retries.");
+    }
 
-        if (!success) {
-            log.error("Failed to generate diagram after " + maxRetries + " attempts.");
-        }
+    private boolean extractAndSendImage(WebSocketSession session, GenerateContentResponse response) {
+        return response.candidates().orElse(Collections.emptyList()).stream()
+                .map(c -> c.content().orElse(null))
+                .filter(content -> content != null)
+                .map(content -> content.parts().orElse(Collections.emptyList()))
+                .flatMap(List::stream)
+                .filter(part -> part.inlineData().isPresent())
+                .map(part -> part.inlineData().get().data().orElse(null))
+                .filter(bytes -> bytes != null && bytes.length > 0)
+                .findFirst()
+                .map(imageBytes -> {
+                    String base64 = Base64.getEncoder().encodeToString(imageBytes);
+                    SignalResponse responseObj = SignalResponse.builder()
+                            .type(SignalResponse.SignalType.IMAGE_GENERATED)
+                            .title("Live Architecture Board")
+                            .description("Generated by Nano Banana Pro")
+                            .imageBase64(base64)
+                            .timestamp(Instant.now())
+                            .confidence(1.0)
+                            .build();
+                    socketHandler.sendSignal(session, responseObj);
+                    log.info("Diagram Sent!");
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    private void sendLoadingSignal(WebSocketSession session) {
+        try {
+            SignalResponse loading = SignalResponse.builder()
+                    .type(SignalResponse.SignalType.IDLE)
+                    .title("Generating Board...")
+                    .description("Gemini 3 is drawing the architecture...")
+                    .timestamp(Instant.now())
+                    .confidence(1.0).build();
+            socketHandler.sendSignal(session, loading);
+        } catch (Exception e) {}
     }
 }
